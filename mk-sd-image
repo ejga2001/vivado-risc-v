@@ -3,7 +3,7 @@
 set -e
 cd -P `dirname $0`
 
-SD_SIZE=1500
+SD_SIZE=6500
 SD_BOOT_SIZE=64
 SD_SWAP_SIZE=
 SD_IMG=debian-riscv64/debian-riscv64.sd.img
@@ -42,10 +42,10 @@ make debian-riscv64/initrd debian-riscv64/rootfs.tar.gz
 # --- Build BBL and Linux ---
 
 if [ ! -f workspace/boot.elf ] ; then
-  make bootloader -j
+  make bootloader -j5
 fi
 if [ ! -f linux-stable/arch/riscv/boot/Image ] ; then
-  make linux -j
+  make linux -j5
 fi
 
 # --- build SD card image ---
@@ -84,7 +84,7 @@ default Debian $KERNEL_VER
 label Debian $KERNEL_VER
  kernel /extlinux/image-$KERNEL_VER
  initrd /extlinux/initrd-$KERNEL_VER.img
- append ro root=UUID=$UUID earlycon initramfs.runsize=24M locale.LANG=en_US.UTF-8
+ append rw root=UUID=$UUID earlycon initramfs.runsize=24M locale.LANG=en_US.UTF-8
 EOF
 
 mkdir -p debian-riscv64/boot
@@ -102,6 +102,50 @@ pushd debian-riscv64/rootfs
     sudo chmod 600 swapfile
     sudo mkswap swapfile
   fi
+  # Copiar benchmarks al sistema de archivos
+  sudo cp -Rf "/home/enrique/CLionProjects/cva-sdk/benchmarks" ./home/debian/
+
+  # Sincronizar cambios
+  sync
+
+  # Preparar entorno chroot
+  sudo cp /usr/bin/qemu-riscv64-static ./usr/bin/
+  sudo mount --bind /dev ./dev
+  sudo mount --bind /proc ./proc
+  sudo mount --bind /sys ./sys
+  sudo cp /etc/resolv.conf ./etc/
+
+  # Entrar al entorno chroot e instalar Python 2
+  sudo chroot . /bin/bash -c "
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y \
+      -o Dpkg::Options::='--force-confdef' \
+      -o Dpkg::Options::='--force-confold' \
+      build-essential libssl-dev libbz2-dev libreadline-dev libsqlite3-dev libffi-dev zlib1g-dev wget linux-perf
+    cd /usr/src
+    wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
+    tar xzf Python-2.7.18.tgz
+    cd Python-2.7.18
+    ./configure --prefix=/usr/local/python2
+    make -j\$(nproc)
+    make install
+    echo 'export PATH=/usr/local/python2/bin:\$PATH' >> /etc/profile
+    source /etc/profile
+    wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
+    python2 get-pip.py
+    cd ~
+    chown -R debian benchmarks
+    echo 'cd ~/benchmarks/parboil' >> ~/.bashrc
+  "
+
+  # Salir del entorno chroot y desmontar sistemas de archivos
+  sudo umount ./dev
+  sudo umount ./proc
+  sudo umount ./sys
+
+  # Sincronizar cambios finales
+  sync
 popd
 
 pushd debian-riscv64/boot
