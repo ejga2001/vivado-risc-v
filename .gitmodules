@@ -18,7 +18,8 @@
 	url = https://github.com/ucb-bar/testchipip.git
 [submodule "generators/riscv-boom"]
 	path = generators/riscv-boom
-	url = https://github.com/riscv-boom/riscv-boom.git
+	url = https://github.com/ejga2001/riscv-boom.git
+	branch = kc705
 [submodule "generators/gemmini"]
 	path = generators/gemmini
 	url = https://github.com/ucb-bar/gemmini
