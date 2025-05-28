@@ -99,7 +99,7 @@ debian-riscv64/rootfs.tar.gz:
 .PHONY: linux
 linux: linux-stable/arch/riscv/boot/Image
 
-CROSS_COMPILE_LINUX = /usr/bin/riscv64-linux-gnu-
+CROSS_COMPILE_LINUX = /home/enrique/CLionProjects/cva-sdk/buildroot/output/host/bin/riscv64-buildroot-linux-gnu-
 
 workspace/patch-linux-done: patches/linux.patch patches/fpga-axi-sdc.c patches/fpga-axi-eth.c patches/linux.config
 	if [ -s patches/linux.patch ] ; then cd linux-stable && ( git apply -R --check ../patches/linux.patch 2>/dev/null || git apply ../patches/linux.patch ) ; fi
