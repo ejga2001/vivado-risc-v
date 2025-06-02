@@ -7,21 +7,17 @@ TOURNAMENT_CONFIGS="2048:2048:2048:2048 4096:4096:4096:4096 8192:8192:8192:8192 
 TAGE_CONFIGS="1024:1:2048 2048:2:2048 4096:3:2048 8192:4:2048 16384:5:2048"
 NUM_CORES=$(nproc)
 
-if [ ! -d stats_bp ]; then
-    mkdir ./stats_bp
-fi
-
 # Run configs
 declare -A job_list
 MAX_JOBS=2
 BANK_WIDTH=4
 jobs=0
 i=0
-: '
+
 for BHT_ENTRIES in ${BHT_CONFIGS}; do
   ARGS="${BHT_ENTRIES}:${BANK_WIDTH}"
   METADATA="_bht=${BHT_ENTRIES}"
-  job_list[$jobs]="taskset -c $(( i % MAX_JOBS )) make CONFIG=rocket64x1BimodalBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
+  job_list[$jobs]="taskset -c $(( i % NUM_CORES )) make CONFIG=rocket64x1BimodalBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
   ((i++))
   ((jobs++))
 done
@@ -29,7 +25,7 @@ done
 for GBP_ENTRIES in ${GBP_CONFIGS}; do
   ARGS="${GBP_ENTRIES}:${BANK_WIDTH}"
   METADATA="_gbp=${GBP_ENTRIES}"
-  job_list[$jobs]="taskset -c $(( i % MAX_JOBS )) make CONFIG=rocket64x1GshareBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
+  job_list[$jobs]="taskset -c $(( i % NUM_CORES )) make CONFIG=rocket64x1GshareBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
   ((i++))
   ((jobs++))
 done
@@ -39,7 +35,7 @@ for LBP_CONFIG in ${LBP_CONFIGS}; do
   LHR_ENTRIES=$(echo $LBP_CONFIG | cut -d ":" -f2)
   ARGS="${LBP_ENTRIES}:${LHR_ENTRIES}:${BANK_WIDTH}"
   METADATA="_lbp=${LBP_ENTRIES}_lhr=${LHR_ENTRIES}"
-  job_list[$jobs]="taskset -c $(( i % MAX_JOBS )) make CONFIG=rocket64x1LocalBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
+  job_list[$jobs]="taskset -c $(( i % NUM_CORES )) make CONFIG=rocket64x1LocalBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
   ((i++))
   ((jobs++))
 done
@@ -51,11 +47,10 @@ for TOURNAMENT_CONFIG in ${TOURNAMENT_CONFIGS}; do
   LHR_ENTRIES=$(echo $TOURNAMENT_CONFIG | cut -d ":" -f4)
   ARGS="${MBP_ENTRIES}:${GBP_ENTRIES}:${LBP_ENTRIES}:${LHR_ENTRIES}:${BANK_WIDTH}"
   METADATA="_mbp=${MBP_ENTRIES}_gbp=${GBP_ENTRIES}_lbp=${LBP_ENTRIES}_lhr=${LHR_ENTRIES}"
-  job_list[$jobs]="taskset -c $(( i % MAX_JOBS )) make CONFIG=rocket64x1TournamentBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
+  job_list[$jobs]="taskset -c $(( i % NUM_CORES )) make CONFIG=rocket64x1TournamentBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
   ((i++))
   ((jobs++))
 done
-'
 
 for TAGE_CONFIG in ${TAGE_CONFIGS}; do
   BHT_ENTRIES=$(echo $TAGE_CONFIG | cut -d ":" -f1)
@@ -63,7 +58,7 @@ for TAGE_CONFIG in ${TAGE_CONFIGS}; do
   UBIT_PERIOD=$(echo $TAGE_CONFIG | cut -d ":" -f3)
   ARGS="${BHT_ENTRIES}:${POWER}:${UBIT_PERIOD}:${BANK_WIDTH}"
   METADATA="_bimodal=${BHT_ENTRIES}_tagever=${POWER}_ubitperiod=${UBIT_PERIOD}"
-  job_list[$jobs]="taskset -c $(( i % MAX_JOBS )) make CONFIG=rocket64x1TAGEBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
+  job_list[$jobs]="taskset -c $(( i % NUM_CORES )) make CONFIG=rocket64x1TAGEBP METADATA=${METADATA} PARAMS=${ARGS} BOARD=kc705 bitstream"
   ((i++))
   ((jobs++))
 done
