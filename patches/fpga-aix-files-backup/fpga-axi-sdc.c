@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/version.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
@@ -34,6 +35,7 @@
 // Capability bits
 #define SDC_CAPABILITY_SD_4BIT  0x0001
 #define SDC_CAPABILITY_SD_RESET 0x0002
+#define SDC_CAPABILITY_ADDR     0xff00
 
 // Control bits
 #define SDC_CONTROL_SD_4BIT     0x0001
@@ -87,7 +89,7 @@ struct sdc_regs {
     volatile uint32_t res_54;
     volatile uint32_t res_58;
     volatile uint32_t res_5c;
-    volatile uint32_t dma_addres;
+    volatile uint64_t dma_addres;
 };
 
 struct sdc_host {
@@ -97,6 +99,10 @@ struct sdc_host {
     spinlock_t lock;
     struct mmc_request * mrq;
     struct mmc_data * data;
+    unsigned dma_addr_bits;
+    unsigned dma_count;
+    dma_addr_t dma_addr;
+    unsigned dma_size;
     int irq;
 };
 
@@ -123,7 +129,7 @@ static void sdc_set_clock(struct sdc_host * host, uint clock) {
     }
 }
 
-static int sdc_cmd_finish(struct sdc_host * host, struct mmc_command * cmd) {
+static void sdc_cmd_finish(struct sdc_host * host, struct mmc_command * cmd) {
     while (1) {
         unsigned status = host->regs->cmd_int_status;
         if (status) {
@@ -138,28 +144,25 @@ static int sdc_cmd_finish(struct sdc_host * host, struct mmc_command * cmd) {
                     cmd->resp[2] = host->regs->response3;
                     cmd->resp[3] = host->regs->response4;
                 }
-                return 0;
+                break;
             }
-            if (status & SDC_CMD_INT_STATUS_CTE) return cmd->error = -ETIME;
-            cmd->error = -EIO;
+            cmd->error = (status & SDC_CMD_INT_STATUS_CTE) ? -ETIME  : -EIO;
             break;
         }
     }
-    return cmd->error;
 }
 
 static int sdc_setup_data_xfer(struct sdc_host * host, struct mmc_host * mmc, struct mmc_data * data) {
-    uint64_t addr = sg_phys(data->sg);
     uint64_t timeout = 0;
 
     data->bytes_xfered = 0;
 
-    if (addr & 3) return -EINVAL;
+    if (host->dma_addr & 3) return -EINVAL;
     if (data->blksz & 3) return -EINVAL;
     if (data->blksz < 4) return -EINVAL;
     if (data->blksz > 0x1000) return -EINVAL;
     if (data->blocks > 0x10000) return -EINVAL;
-    if (addr + data->blksz * data->blocks > 0x100000000) return -EINVAL;
+    if (host->dma_addr + data->blksz * data->blocks > ((uint64_t)1 << host->dma_addr_bits)) return -EINVAL;
     if (data->sg->length < data->blksz * data->blocks) return -EINVAL;
 
     // SD card data transfer time
@@ -167,7 +170,7 @@ static int sdc_setup_data_xfer(struct sdc_host * host, struct mmc_host * mmc, st
     // SD card "busy" time
     timeout += (uint64_t)mmc->ios.clock * BUSY_TIMEOUT_MS / 1000 * data->blocks;
 
-    host->regs->dma_addres = (uint32_t)addr;
+    host->regs->dma_addres = (uint64_t)host->dma_addr;
     host->regs->block_size = data->blksz - 1;
     host->regs->block_count = data->blocks - 1;
     host->regs->data_timeout = (uint32_t)timeout;
@@ -193,10 +196,20 @@ static int sdc_send_cmd(struct sdc_host * host, struct mmc_host * mmc, struct mm
     if (cmd->flags & MMC_RSP_OPCODE) command |= 1 << 4;
 
     if (data && (data->flags & (MMC_DATA_READ | MMC_DATA_WRITE)) && data->blocks) {
+        host->dma_count = dma_map_sg(&host->pdev->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
+        if (host->dma_count != 1) {
+            dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
+            return data->error = -EIO;
+        }
+        host->dma_addr = sg_dma_address(data->sg);
+        host->dma_size = sg_dma_len(data->sg);
         if (data->flags & MMC_DATA_READ) command |= 1 << 5;
         if (data->flags & MMC_DATA_WRITE) command |= 1 << 6;
         data->error = sdc_setup_data_xfer(host, mmc, data);
-        if (data->error < 0) return data->error;
+        if (data->error < 0) {
+            dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
+            return data->error;
+        }
         xfer = 1;
     }
 
@@ -207,7 +220,11 @@ static int sdc_send_cmd(struct sdc_host * host, struct mmc_host * mmc, struct mm
     if (host->regs->cmd_timeout != timeout) host->regs->cmd_timeout = 0;
     host->regs->argument = cmd->arg;
 
-    if (sdc_cmd_finish(host, cmd) < 0) return cmd->error;
+    sdc_cmd_finish(host, cmd);
+    if (cmd->error < 0) {
+        if (xfer) dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
+        return cmd->error;
+    }
     if (xfer) host->data = data;
 
     return 0;
@@ -290,6 +307,21 @@ static void sdc_reset(struct mmc_host * mmc) {
     spin_unlock_irq(&host->lock);
 }
 
+static void sdc_card_reset(struct mmc_host * mmc) {
+    struct sdc_host * host = mmc_priv(mmc);
+    uint32_t control = 0;
+
+    spin_lock_irq(&host->lock);
+
+    control = host->regs->control;
+    host->regs->control = control | SDC_CONTROL_SD_RESET;
+    udelay(10);
+    host->regs->control = control & ~(uint32_t)SDC_CONTROL_SD_RESET;
+    udelay(10);
+
+    spin_unlock_irq(&host->lock);
+}
+
 static int sdc_get_cd(struct mmc_host * mmc) {
     struct sdc_host * host = mmc_priv(mmc);
     uint32_t card_detect = host->regs->card_detect;
@@ -336,6 +368,7 @@ static irqreturn_t sdc_isr(int irq, void * dev_id) {
             }
             if (mrq->stop) sdc_send_cmd(host, mmc, mrq->stop, NULL);
             mmc_request_done(mmc, mrq);
+            dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
             host->data = NULL;
             host->mrq = NULL;
         }
@@ -351,7 +384,7 @@ static const struct mmc_host_ops axi_sdc_ops = {
     .request = sdc_request,
     .set_ios = sdc_set_ios,
     .get_cd = sdc_get_cd,
-    .hw_reset = sdc_reset,
+    .card_hw_reset = sdc_card_reset,
 };
 
 static int axi_sdc_probe(struct platform_device * pdev) {
@@ -360,6 +393,7 @@ static int axi_sdc_probe(struct platform_device * pdev) {
     struct sdc_host * host;
     struct mmc_host * mmc;
     void __iomem * ioaddr;
+    uint32_t capability;
     int irq;
     int ret;
 
@@ -390,8 +424,11 @@ static int axi_sdc_probe(struct platform_device * pdev) {
 
     if (mmc->f_min == 0) mmc->f_min = host->clk_freq / 0x200; /* maximum clock division 256 * 2 */
     if (mmc->f_max == 0) mmc->f_max = host->clk_freq / 2; /* minimum clock division 2 */
-    mmc->caps |= MMC_CAP_SD_HIGHSPEED | MMC_CAP_MMC_HIGHSPEED;
-    mmc->caps2 |= MMC_CAP2_NO_SDIO;
+    if ((mmc->caps2 & MMC_CAP2_NO_SDIO) == 0) {
+        /* TODO: deprecated 10/19/2022, set in DTS */
+        mmc->caps |= MMC_CAP_SD_HIGHSPEED | MMC_CAP_MMC_HIGHSPEED;
+        mmc->caps2 |= MMC_CAP2_NO_SDIO;
+    }
     mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34;
     mmc->max_segs = 1;
     mmc->max_req_size = 0x2000000;
@@ -405,10 +442,23 @@ static int axi_sdc_probe(struct platform_device * pdev) {
         return ret;
     }
 
+    host->dma_addr_bits = 32;
+    capability = host->regs->capability;
+    if (capability & SDC_CAPABILITY_ADDR) {
+        host->dma_addr_bits = (capability & SDC_CAPABILITY_ADDR) >> __builtin_ctz(SDC_CAPABILITY_ADDR);
+        ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(host->dma_addr_bits));
+        if (ret) {
+            printk(KERN_ERR "AXI-SDC: Can't set DMA mask\n");
+            mmc_free_host(mmc);
+            return ret;
+        }
+    }
+
     sdc_reset(mmc);
 
     ret = mmc_add_host(mmc);
     if (ret) {
+        printk(KERN_ERR "AXI-SDC: Can't register device\n");
         mmc_free_host(mmc);
         return ret;
     }
@@ -419,14 +469,20 @@ static int axi_sdc_probe(struct platform_device * pdev) {
     return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
 static int axi_sdc_remove(struct platform_device * pdev) {
+#else
+static void axi_sdc_remove(struct platform_device * pdev) {
+#endif
     struct sdc_host * host = platform_get_drvdata(pdev);
     struct mmc_host * mmc = mmc_from_priv(host);
 
     free_irq(host->irq, mmc);
     mmc_remove_host(mmc);
     mmc_free_host(mmc);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
     return 0;
+#endif
 }
 
 static struct platform_driver axi_sdc_driver = {

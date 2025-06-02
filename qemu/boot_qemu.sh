@@ -1,3 +1,4 @@
+echo $(pwd)
 if [ ! -e debian-riscv64/debian-riscv64.sd.img ]
 then
     ./mk-sd-image

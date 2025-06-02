@@ -180,6 +180,8 @@ opensbi-qemu:
 # --- generate HDL ---
 
 CONFIG_SCALA := $(subst rocket,Rocket,$(CONFIG))
+METADATA ?=
+PARAMS ?= ''
 
 # valid ROCKET_FREQ_MHZ values (MHz): 160 125 100 80 62.5 50 40 31.25 25 20
 ROCKET_FREQ_MHZ ?= 100.0 #$(shell awk '$$3 != "" && "$(BOARD)" ~ $$1 && "$(CONFIG_SCALA)" ~ ("^" $$2 "$$") {print $$3; exit}' board/rocket-freq)
@@ -205,7 +207,7 @@ ifeq ($(shell echo $$(($(MEMORY_SIZE) <= 0x80000000))),1)
   MEMORY_ADDR_RANGE64 = 0x0 0x80000000 0x0 $(MEMORY_SIZE)
 else
   MEMORY_ADDR_RANGE32 = 0x80000000 0x80000000
-  MEMORY_SIZE_CPU = ${shell cat workspace/$(CONFIG)/system.dts | sed -n 's/.*reg = <0x0 0x80000000 *\(0x[0-9A-Fa-f]*\) *0x\([0-9A-Fa-f]*\)>.*/\1\2/p'}
+  MEMORY_SIZE_CPU = ${shell cat workspace/$(CONFIG)$(METADATA)/system.dts | sed -n 's/.*reg = <0x0 0x80000000 *\(0x[0-9A-Fa-f]*\) *0x\([0-9A-Fa-f]*\)>.*/\1\2/p'}
   MEMORY_SIZE_AWK = if (CPU < DDR) SIZE=CPU; else SIZE=DDR; printf "0x%x 0x%x", SIZE / 0x100000000, SIZE % 0x100000000
   MEMORY_ADDR_RANGE64 = 0x0 0x80000000 $(shell echo - | awk '{CPU=$(MEMORY_SIZE_CPU); DDR=$(MEMORY_SIZE); $(MEMORY_SIZE_AWK)}')
 endif
@@ -234,19 +236,19 @@ workspace/patch-hdl-done:
 	mkdir -p workspace && touch workspace/patch-hdl-done
 
 # Generate default device tree - not including peripheral devices or board specific data
-workspace/$(CONFIG)/system.dts: $(CHISEL_SRC) rocket-chip/bootrom/bootrom.img workspace/patch-hdl-done
-	rm -rf workspace/$(CONFIG)/tmp
-	mkdir -p workspace/$(CONFIG)/tmp
+workspace/$(CONFIG)$(METADATA)/system.dts: $(CHISEL_SRC) rocket-chip/bootrom/bootrom.img workspace/patch-hdl-done
+	rm -rf workspace/$(CONFIG)$(METADATA)/tmp
+	mkdir -p workspace/$(CONFIG)$(METADATA)/tmp
 	cp rocket-chip/bootrom/bootrom.img workspace/bootrom.img
-	$(SBT) "runMain freechips.rocketchip.diplomacy.Main --dir `realpath workspace/$(CONFIG)/tmp` --top Vivado.RocketSystem --config Vivado.$(CONFIG_SCALA)"
-	mv workspace/$(CONFIG)/tmp/Vivado.$(CONFIG_SCALA).dts workspace/$(CONFIG)/system.dts
-	rm -rf workspace/$(CONFIG)/tmp
+	$(SBT) "runMain freechips.rocketchip.diplomacy.Main --dir `realpath workspace/$(CONFIG)$(METADATA)/tmp` --top Vivado.RocketSystem --config Vivado.$(CONFIG_SCALA) --params $(PARAMS)"
+	mv workspace/$(CONFIG)$(METADATA)/tmp/Vivado.$(CONFIG_SCALA).dts workspace/$(CONFIG)$(METADATA)/system.dts
+	rm -rf workspace/$(CONFIG)$(METADATA)/tmp
 
 # Generate board specific device tree, boot ROM and FIRRTL
-workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.fir: workspace/$(CONFIG)/system.dts $(wildcard bootrom/*) workspace/gcc/riscv
-	rm -rf workspace/$(CONFIG)/system-$(BOARD)
-	mkdir -p workspace/$(CONFIG)/system-$(BOARD)
-	cat workspace/$(CONFIG)/system.dts board/$(BOARD)/bootrom.dts >bootrom/system.dts
+workspace/$(CONFIG)$(METADATA)/system-$(BOARD)/RocketSystem.fir: workspace/$(CONFIG)$(METADATA)/system.dts $(wildcard bootrom/*) workspace/gcc/riscv
+	rm -rf workspace/$(CONFIG)$(METADATA)/system-$(BOARD)
+	mkdir -p workspace/$(CONFIG)$(METADATA)/system-$(BOARD)
+	cat workspace/$(CONFIG)$(METADATA)/system.dts board/$(BOARD)/bootrom.dts >bootrom/system.dts
 	sed -i "s#reg = <0x80000000 *0x.*>#reg = <$(MEMORY_ADDR_RANGE32)>#g" bootrom/system.dts
 	sed -i "s#reg = <0x0 0x80000000 *0x.*>#reg = <$(MEMORY_ADDR_RANGE64)>#g" bootrom/system.dts
 	sed -i "s#clock-frequency = <[0-9]*>#clock-frequency = <$(ROCKET_CLOCK_FREQ)>#g" bootrom/system.dts
@@ -255,22 +257,22 @@ workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.fir: workspace/$(CONFIG)/system
 	if [ ! -z "$(ETHER_PHY)" ] ; then sed -i "s#phy-mode = \".*\"#phy-mode = \"$(ETHER_PHY)\"#g" bootrom/system.dts ; fi
 	sed -i "/interrupts-extended = <&.* 65535>;/d" bootrom/system.dts
 	make -C bootrom CROSS_COMPILE="$(CROSS_COMPILE_NO_OS_TOOLS)" CFLAGS="$(CROSS_COMPILE_NO_OS_FLAGS)" BOARD=$(BOARD) clean bootrom.img
-	mv bootrom/system.dts workspace/$(CONFIG)/system-$(BOARD).dts
+	mv bootrom/system.dts workspace/$(CONFIG)$(METADATA)/system-$(BOARD).dts
 	mv bootrom/bootrom.img workspace/bootrom.img
-	$(SBT) "runMain freechips.rocketchip.diplomacy.Main --dir `realpath workspace/$(CONFIG)/system-$(BOARD)` --top Vivado.RocketSystem --config Vivado.$(CONFIG_SCALA)"
+	$(SBT) "runMain freechips.rocketchip.diplomacy.Main --dir `realpath workspace/$(CONFIG)$(METADATA)/system-$(BOARD)` --top Vivado.RocketSystem --config Vivado.$(CONFIG_SCALA) --params $(PARAMS)"
 	$(SBT) assembly
 	rm workspace/bootrom.img
 
 # Generate Rocket SoC HDL
-workspace/$(CONFIG)/system-$(BOARD).v: workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.fir
+workspace/$(CONFIG)$(METADATA)/system-$(BOARD).v: workspace/$(CONFIG)$(METADATA)/system-$(BOARD)/RocketSystem.fir
 	$(FIRRTL) -i $< -o RocketSystem.v --compiler verilog \
-	  --annotation-file workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.anno.json \
+	  --annotation-file workspace/$(CONFIG)$(METADATA)/system-$(BOARD)/RocketSystem.anno.json \
 	  --custom-transforms firrtl.passes.InlineInstances \
 	  --target:fpga
-	cp workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.v workspace/$(CONFIG)/system-$(BOARD).v
+	cp workspace/$(CONFIG)$(METADATA)/system-$(BOARD)/RocketSystem.v workspace/$(CONFIG)$(METADATA)/system-$(BOARD).v
 
 # Generate Rocket SoC wrapper for Vivado
-workspace/$(CONFIG)/rocket.vhdl: workspace/$(CONFIG)/system-$(BOARD).v
+workspace/$(CONFIG)$(METADATA)/rocket.vhdl: workspace/$(CONFIG)$(METADATA)/system-$(BOARD).v
 	mkdir -p vhdl-wrapper/bin
 	javac -g -nowarn \
 	  -sourcepath vhdl-wrapper/src -d vhdl-wrapper/bin \
@@ -279,7 +281,7 @@ workspace/$(CONFIG)/rocket.vhdl: workspace/$(CONFIG)/system-$(BOARD).v
 	java -Xmx4G -Xss8M $(JAVA_OPTIONS) -cp \
 	  vhdl-wrapper/src:vhdl-wrapper/bin:vhdl-wrapper/antlr-4.8-complete.jar \
 	  net.largest.riscv.vhdl.Main -m $(CONFIG_SCALA) \
-	  workspace/$(CONFIG)/system-$(BOARD).v >$@
+	  workspace/$(CONFIG)$(METADATA)/system-$(BOARD).v >$@
 
 # --- utility make targets to run SBT command line ---
 
@@ -298,16 +300,16 @@ rocket-sbt:
 FPGA_FNM    ?= riscv_wrapper.bit
 
 proj_name   = $(BOARD)-riscv
-proj_path   = workspace/$(CONFIG)/vivado-$(proj_name)
+proj_path   = workspace/$(CONFIG)$(METADATA)/vivado-$(proj_name)
 proj_file   = $(proj_path)/$(proj_name).xpr
 proj_time   = $(proj_path)/timestamp.txt
 synthesis   = $(proj_path)/$(proj_name).runs/synth_1/riscv_wrapper.dcp
 bitstream   = $(proj_path)/$(proj_name).runs/impl_1/$(FPGA_FNM)
-cfgmem_file = workspace/$(CONFIG)/$(proj_name).$(CFG_FORMAT)
-prm_file    = workspace/$(CONFIG)/$(proj_name).prm
+cfgmem_file = workspace/$(CONFIG)$(METADATA)/$(proj_name).$(CFG_FORMAT)
+prm_file    = workspace/$(CONFIG)$(METADATA)/$(proj_name).prm
 vivado      = env XILINX_LOCAL_USER_DATA=no vivado -mode batch -nojournal -nolog -notrace -quiet
 
-workspace/$(CONFIG)/system-$(BOARD).tcl: workspace/$(CONFIG)/rocket.vhdl workspace/$(CONFIG)/system-$(BOARD).v
+workspace/$(CONFIG)$(METADATA)/system-$(BOARD).tcl: workspace/$(CONFIG)$(METADATA)/rocket.vhdl workspace/$(CONFIG)$(METADATA)/system-$(BOARD).v
 	echo "set vivado_board_name $(BOARD)" >$@
 	if [ "$(BOARD_PART)" != "" -a "$(BOARD_PART)" != "NONE" ] ; then echo "set vivado_board_part $(BOARD_PART)" >>$@ ; fi
 	if [ "$(BOARD_CONFIG)" != "" ] ; then echo "set board_config $(BOARD_CONFIG)" >>$@ ; fi
@@ -318,10 +320,10 @@ workspace/$(CONFIG)/system-$(BOARD).tcl: workspace/$(CONFIG)/rocket.vhdl workspa
 	echo 'cd [file dirname [file normalize [info script]]]' >>$@
 	echo 'source ../../vivado.tcl' >>$@
 
-vivado-tcl: workspace/$(CONFIG)/system-$(BOARD).tcl
+vivado-tcl: workspace/$(CONFIG)$(METADATA)/system-$(BOARD).tcl
 
-$(proj_time): workspace/$(CONFIG)/system-$(BOARD).tcl
-	if [ ! -e $(proj_path) ] ; then $(vivado) -source workspace/$(CONFIG)/system-$(BOARD).tcl || ( rm -rf $(proj_path) ; exit 1 ) ; fi
+$(proj_time): workspace/$(CONFIG)$(METADATA)/system-$(BOARD).tcl
+	if [ ! -e $(proj_path) ] ; then $(vivado) -source workspace/$(CONFIG)$(METADATA)/system-$(BOARD).tcl || ( rm -rf $(proj_path) ; exit 1 ) ; fi
 	date >$@
 
 vivado-project: $(proj_time)

@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
+#include <linux/platform_device.h>
 #include <linux/etherdevice.h>
+#include <linux/ethtool.h>
 #include <linux/of_device.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
@@ -23,19 +26,18 @@
 #define AXI_ETH_MIN_MTU (ETH_ZLEN + ETH_HLEN)
 #define AXI_ETH_MAX_MTU 9000
 
-#define AXI_ETH_RING_MASK 0xf
-#define AXI_ETH_RING_SIZE (AXI_ETH_RING_MASK + 1)
+#define AXI_ETH_MAX_RING_SIZE 0x40
 
 struct eth_regs {
-    volatile uint32_t net_status;
     volatile uint32_t mac_status;
+    volatile uint32_t nic_status;
     volatile uint32_t int_enable;
     volatile uint32_t int_status;
     volatile uint32_t rx_inp;
     volatile uint32_t rx_out;
     volatile uint32_t tx_inp;
     volatile uint32_t tx_out;
-    volatile uint32_t mac_control;
+    volatile uint32_t nic_control;
     volatile uint32_t mdio_tx;
     volatile uint32_t mdio_rx;
     volatile uint32_t capability;
@@ -48,47 +50,52 @@ struct eth_pkt_regs {
     volatile uint32_t status;
 };
 
-#define NET_STATUS_LINK_OK      (1 << 0)
-#define NET_STATUS_LINK_SYNC    (1 << 1)
-#define NET_STATUS_RUDI_C       (1 << 2)
-#define NET_STATUS_RUDI_I       (1 << 3)
-#define NET_STATUS_RUDI_ERR     (1 << 4)
-#define NET_STATUS_RXDISPERR    (1 << 5)
-#define NET_STATUS_RXNOTINTABLE (1 << 6)
-#define NET_STATUS_PHY_LINK_OK  (1 << 7)
-#define NET_STATUS_SPEED_100    (1 << 10)
-#define NET_STATUS_SPEED_1000   (1 << 11)
-#define NET_STATUS_DUPLEX       (1 << 12)
-#define NET_STATUS_REMOTE_FAULT (1 << 13)
-#define NET_STATUS_PAUSE_SYM    (1 << 14)
-#define NET_STATUS_PAUSE_ASYM   (1 << 15)
+#define MAC_STATUS_LINK_OK      (1 << 0)
+#define MAC_STATUS_LINK_SYNC    (1 << 1)
+#define MAC_STATUS_RUDI_C       (1 << 2)
+#define MAC_STATUS_RUDI_I       (1 << 3)
+#define MAC_STATUS_RUDI_ERR     (1 << 4)
+#define MAC_STATUS_RXDISPERR    (1 << 5)
+#define MAC_STATUS_RXNOTINTABLE (1 << 6)
+#define MAC_STATUS_PHY_LINK_OK  (1 << 7)
+#define MAC_STATUS_SPEED_100    (1 << 10)
+#define MAC_STATUS_SPEED_1000   (1 << 11)
+#define MAC_STATUS_DUPLEX       (1 << 12)
+#define MAC_STATUS_REMOTE_FAULT (1 << 13)
+#define MAC_STATUS_PAUSE_SYM    (1 << 14)
+#define MAC_STATUS_PAUSE_ASYM   (1 << 15)
 
-#define MAC_STATUS_RX_BUSY      (1 << 0)
-#define MAC_STATUS_TX_BUSY      (1 << 1)
-#define MAC_STATUS_AXI_WR_CYC   (1 << 2)
-#define MAC_STATUS_AXI_WR_ERR   (1 << 3)
-#define MAC_STATUS_AXI_RD_CYC   (1 << 4)
-#define MAC_STATUS_AXI_RD_ERR   (1 << 5)
+#define NIC_STATUS_RX_BUSY      (1 << 0)
+#define NIC_STATUS_TX_BUSY      (1 << 1)
+#define NIC_STATUS_AXI_WR_CYC   (1 << 2)
+#define NIC_STATUS_AXI_WR_ERR   (1 << 3)
+#define NIC_STATUS_AXI_RD_CYC   (1 << 4)
+#define NIC_STATUS_AXI_RD_ERR   (1 << 5)
 
 #define INT_STATUS_RX           (1 << 16)
 #define INT_STATUS_TX           (1 << 17)
 #define INT_STATUS_MDIO         (1 << 18)
 #define INT_STATUS_PHY          (1 << 19)
 
-#define MAC_CONTROL_EN_RX       (1 << 0)
-#define MAC_CONTROL_EN_TX       (1 << 1)
-#define MAC_CONTROL_MDIO_RESET  (1 << 2)
+#define NIC_CONTROL_EN_RX       (1 << 0)
+#define NIC_CONTROL_EN_TX       (1 << 1)
+#define NIC_CONTROL_MDIO_RESET  (1 << 2)
 
 #define MDIO_RESET_DELAY        10
 #define MDIO_POLL_DELAY         4
 
-#define MAC_CAPABILITY_BURST    0x000f
-#define MAC_CAPABILITY_RING     0x00f0
-#define MAC_CAPABILITY_MDIO     0x0100
+#define NIC_CAPABILITY_BURST    0x000f
+#define NIC_CAPABILITY_RING     0x00f0
+#define NIC_CAPABILITY_MDIO     0x0100
+#define NIC_CAPABILITY_ADDR     0xfc00
+
+#define PKT_STATUS_BAD_FRAME    (1 << 0)
+#define PKT_STATUS_BUS_ERROR    (1 << 1)
 
 struct axi_eth_ring_item {
     struct sk_buff * skb;
     dma_addr_t dma_addr;
+    unsigned dma_size;
 };
 
 struct axi_eth_stats {
@@ -98,6 +105,7 @@ struct axi_eth_stats {
 };
 
 struct axi_eth_priv {
+    unsigned dev_no;
     struct eth_regs __iomem * regs;
     struct eth_pkt_regs __iomem * rx_pkt_regs;
     struct eth_pkt_regs __iomem * tx_pkt_regs;
@@ -105,12 +113,14 @@ struct axi_eth_priv {
     struct net_device * net_dev;
     struct phy_device * phy_dev;
     struct mii_bus * mdio_bus;
+    unsigned dma_addr_bits;
+    unsigned ring_mask;
     spinlock_t lock;
     int irq;
 
     uint32_t int_enable;
-    struct axi_eth_ring_item rx_ring[AXI_ETH_RING_SIZE];
-    struct axi_eth_ring_item tx_ring[AXI_ETH_RING_SIZE];
+    struct axi_eth_ring_item rx_ring[AXI_ETH_MAX_RING_SIZE];
+    struct axi_eth_ring_item tx_ring[AXI_ETH_MAX_RING_SIZE];
     uint32_t rx_inp;
     uint32_t rx_out;
     uint32_t tx_inp;
@@ -120,7 +130,12 @@ struct axi_eth_priv {
     struct axi_eth_stats tx_stats;
 };
 
-#define tx_ring_free(p) ((p->tx_out - p->tx_inp - 1) & AXI_ETH_RING_MASK)
+#define tx_ring_free(p) ((p->tx_out - p->tx_inp - 1) & p->ring_mask)
+
+#define DRIVER_NAME "riscv-axi-eth"
+#define MDIO_BUS_NAME "axi-eth-mdio"
+
+static u32 axi_eth_debug = 0;
 
 static const struct of_device_id axi_eth_of_match_table[] = {
     { .compatible = "riscv,axi-ethernet-1.0" },
@@ -184,7 +199,7 @@ static int axi_eth_mdio_reset(struct mii_bus * bus) {
     struct axi_eth_priv * priv = bus->priv;
     unsigned timeout = 0;
 
-    priv->regs->mac_control |= MAC_CONTROL_MDIO_RESET;
+    priv->regs->nic_control |= NIC_CONTROL_MDIO_RESET;
     for (timeout = 0; timeout < 1000; timeout++) {
         int rd = axi_eth_mdio_read(bus, 0, 2);
         if (rd == 0xffff) break;
@@ -192,7 +207,7 @@ static int axi_eth_mdio_reset(struct mii_bus * bus) {
     }
     udelay(MDIO_RESET_DELAY);
 
-    priv->regs->mac_control &= ~MAC_CONTROL_MDIO_RESET;
+    priv->regs->nic_control &= ~NIC_CONTROL_MDIO_RESET;
     for (timeout = 0; timeout < 1000; timeout++) {
         int rd = axi_eth_mdio_read(bus, 0, 2);
         if (rd > 0 && rd < 0xffff) break;
@@ -215,8 +230,8 @@ static int axi_eth_mdio_register(struct axi_eth_priv * priv) {
 
     mdio_bus->priv = priv;
     mdio_bus->parent = &priv->pdev->dev;
-    mdio_bus->name = "axi-eth-mdio";
-    snprintf(mdio_bus->id, MII_BUS_ID_SIZE, "%s-%d", mdio_bus->name, priv->pdev->id);
+    mdio_bus->name = MDIO_BUS_NAME;
+    snprintf(mdio_bus->id, MII_BUS_ID_SIZE, "%s-%u", mdio_bus->name, priv->dev_no);
 
     mdio_bus->read = axi_eth_mdio_read;
     mdio_bus->write = axi_eth_mdio_write;
@@ -245,12 +260,12 @@ static void axi_eth_rx_done(struct net_device * net_dev, struct axi_eth_ring_ite
     struct axi_eth_priv * priv = netdev_priv(net_dev);
     struct sk_buff * skb = i->skb;
     uint32_t status = priv->rx_pkt_regs[priv->rx_out].status;
-    dma_unmap_single(&priv->pdev->dev, i->dma_addr, net_dev->mtu + ETH_HLEN, DMA_FROM_DEVICE);
-    if (status & 1) {
+    dma_unmap_single(&priv->pdev->dev, i->dma_addr, i->dma_size, DMA_FROM_DEVICE);
+    if (status & PKT_STATUS_BAD_FRAME) {
         dev_kfree_skb_any(skb);
         net_dev->stats.rx_dropped++;
     }
-    else if (status & 2) {
+    else if (status & PKT_STATUS_BUS_ERROR) {
         dev_kfree_skb_any(skb);
         net_dev->stats.rx_errors++;
     }
@@ -276,56 +291,70 @@ static void axi_eth_tx_done(struct net_device * net_dev, struct axi_eth_ring_ite
     priv->tx_stats.bytes += skb->len;
     u64_stats_update_end(&priv->tx_stats.syncp);
     dev_consume_skb_any(skb);
-    dma_unmap_single(&priv->pdev->dev, i->dma_addr, skb->len, DMA_TO_DEVICE);
+    dma_unmap_single(&priv->pdev->dev, i->dma_addr, i->dma_size, DMA_TO_DEVICE);
     i->skb = NULL;
 }
 
 static netdev_tx_t axi_eth_xmit(struct sk_buff * skb, struct net_device * net_dev) {
     struct axi_eth_priv * priv = netdev_priv(net_dev);
+    const char * err = NULL;
+    unsigned pkt_size = 0;
     dma_addr_t dma_addr;
-    int drop = 0;
-
-    if (skb->len < ETH_ZLEN && skb_padto(skb, ETH_ZLEN)) {
-        netdev_err(net_dev, "Padding error\n");
-        dev_kfree_skb_any(skb);
-        drop = 1;
-    }
-    else {
-        dma_addr = dma_map_single(&priv->pdev->dev, skb->data, skb->len, DMA_TO_DEVICE);
-        if (dma_mapping_error(&priv->pdev->dev, dma_addr)) {
-            netdev_err(net_dev, "DMA mapping error\n");
-            dev_kfree_skb_any(skb);
-            drop = 1;
-        }
-    }
 
     spin_lock_irq(&priv->lock);
 
-    if (drop) {
-        net_dev->stats.tx_dropped++;
+    if (skb->len < ETH_ZLEN && skb_padto(skb, ETH_ZLEN)) {
+        err = "Padding error\n";
+    }
+    else if (skb->len > 0x3fff) {
+        err = "Packet too large\n";
+    }
+    else if (skb->data_len > 0) {
+        /* If there are page buffers, the total number of bytes in the page buffer area is 'data_len' */
+        err = "Paging error\n";
     }
     else {
-        uint32_t tx_next = (priv->tx_inp + 1) & AXI_ETH_RING_MASK;
+        pkt_size = skb->len;
+        dma_addr = dma_map_single(&priv->pdev->dev, skb->data, pkt_size, DMA_TO_DEVICE);
+        if (dma_mapping_error(&priv->pdev->dev, dma_addr)) {
+            err = "DMA mapping error\n";
+        }
+        else if (dma_addr + pkt_size > ((uint64_t)1 << priv->dma_addr_bits)) {
+            dma_unmap_single(&priv->pdev->dev, dma_addr, pkt_size, DMA_TO_DEVICE);
+            err = "DMA mapping error: address overflow\n";
+        }
+    }
+
+    if (err) {
+        net_dev->stats.tx_dropped++;
+        netdev_err(net_dev, err);
+        dev_kfree_skb_any(skb);
+    }
+    else {
+        uint32_t tx_next = (priv->tx_inp + 1) & priv->ring_mask;
         struct axi_eth_ring_item * i = priv->tx_ring + priv->tx_inp;
         if (tx_next == priv->tx_out) {
             struct axi_eth_ring_item * i = priv->tx_ring + priv->tx_out;
             while (priv->tx_out == priv->regs->tx_out) {}
             if (i->skb) axi_eth_tx_done(net_dev, i);
-            priv->tx_out = (priv->tx_out + 1) & AXI_ETH_RING_MASK;
+            priv->tx_out = (priv->tx_out + 1) & priv->ring_mask;
         }
 
         skb_tx_timestamp(skb);
 
         i->skb = skb;
+        i->dma_size = pkt_size;
         i->dma_addr = dma_addr;
-        priv->tx_pkt_regs[priv->tx_inp].addr = i->dma_addr;
-        priv->tx_pkt_regs[priv->tx_inp].size = skb->len;
-
-        wmb();
+        priv->tx_pkt_regs[priv->tx_inp].addr = i->dma_addr; wmb();
+        priv->tx_pkt_regs[priv->tx_inp].size = i->dma_size | ((i->dma_addr >> 32) << 16); wmb();
         priv->regs->tx_inp = priv->tx_inp = tx_next;
 
         if (tx_ring_free(priv) == 0) netif_stop_queue(net_dev);
     }
+
+    if (netif_queue_stopped(net_dev) &&
+        tx_ring_free(priv) >= priv->ring_mask / 2)
+        netif_wake_queue(net_dev);
 
     spin_unlock_irq(&priv->lock);
 
@@ -338,6 +367,7 @@ static void axi_eth_get_stats64(struct net_device * net_dev, struct rtnl_link_st
 
     netdev_stats_to_stats64(stats, &net_dev->stats);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0)
     do {
         start = u64_stats_fetch_begin_irq(&priv->rx_stats.syncp);
         stats->rx_packets = priv->rx_stats.packets;
@@ -351,32 +381,61 @@ static void axi_eth_get_stats64(struct net_device * net_dev, struct rtnl_link_st
         stats->tx_bytes = priv->tx_stats.bytes;
     }
     while (u64_stats_fetch_retry_irq(&priv->tx_stats.syncp, start));
+#else
+    do {
+        start = u64_stats_fetch_begin(&priv->rx_stats.syncp);
+        stats->rx_packets = priv->rx_stats.packets;
+        stats->rx_bytes = priv->rx_stats.bytes;
+    }
+    while (u64_stats_fetch_retry(&priv->rx_stats.syncp, start));
+
+    do {
+        start = u64_stats_fetch_begin(&priv->tx_stats.syncp);
+        stats->tx_packets = priv->tx_stats.packets;
+        stats->tx_bytes = priv->tx_stats.bytes;
+    }
+    while (u64_stats_fetch_retry(&priv->tx_stats.syncp, start));
+#endif
 }
 
 static void axi_eth_add_rx_buffers(struct net_device * net_dev) {
     struct axi_eth_priv * priv = netdev_priv(net_dev);
+    unsigned pkt_size = net_dev->mtu + ETH_HLEN;
+    if (pkt_size > 0x3fff) pkt_size = 0x3fff;
     for (;;) {
+        const char * err = NULL;
         struct axi_eth_ring_item * i;
         struct sk_buff * skb;
-        uint32_t rx_next = (priv->rx_inp + 1) & AXI_ETH_RING_MASK;
+        dma_addr_t dma_addr;
+        uint32_t rx_next = (priv->rx_inp + 1) & priv->ring_mask;
+
         if (rx_next == priv->rx_out) break;
         i = priv->rx_ring + priv->rx_inp;
-        skb = netdev_alloc_skb_ip_align(net_dev, net_dev->mtu + ETH_HLEN);
+        skb = netdev_alloc_skb_ip_align(net_dev, pkt_size);
         if (!skb) {
             netdev_err(net_dev, "Cannot allocate DMA buffer\n");
             net_dev->stats.rx_errors++;
             return;
         }
-        i->dma_addr = dma_map_single(&priv->pdev->dev, skb->data, net_dev->mtu + ETH_HLEN, DMA_FROM_DEVICE);
-        if (dma_mapping_error(&priv->pdev->dev, i->dma_addr)) {
-            netdev_err(net_dev, "DMA mapping error\n");
+        dma_addr = dma_map_single(&priv->pdev->dev, skb->data, pkt_size, DMA_FROM_DEVICE);
+        if (dma_mapping_error(&priv->pdev->dev, dma_addr)) {
+            err = "DMA mapping error\n";
+        }
+        else if (dma_addr + pkt_size > ((uint64_t)1 << priv->dma_addr_bits)) {
+            dma_unmap_single(&priv->pdev->dev, dma_addr, pkt_size, DMA_FROM_DEVICE);
+            err = "DMA mapping error: address overflow\n";
+        }
+        if (err) {
+            netdev_err(net_dev, err);
             net_dev->stats.rx_errors++;
             dev_kfree_skb_any(skb);
             return;
         }
         i->skb = skb;
-        priv->rx_pkt_regs[priv->rx_inp].addr = i->dma_addr;
-        priv->rx_pkt_regs[priv->rx_inp].size = net_dev->mtu + ETH_HLEN;
+        i->dma_size = pkt_size;
+        i->dma_addr = dma_addr;
+        priv->rx_pkt_regs[priv->rx_inp].addr = i->dma_addr; wmb();
+        priv->rx_pkt_regs[priv->rx_inp].size = i->dma_size | ((i->dma_addr >> 32) << 16); wmb();
         priv->regs->rx_inp = priv->rx_inp = rx_next;
     }
 }
@@ -388,24 +447,24 @@ static int axi_eth_change_mtu(struct net_device * net_dev, int new_mtu) {
         spin_lock_irq(&priv->lock);
 
         /* Disable RX */
-        priv->regs->mac_control &= ~MAC_CONTROL_EN_RX;
+        priv->regs->nic_control &= ~NIC_CONTROL_EN_RX;
         /* Wait active RX to finish */
-        while (priv->regs->mac_status & 1) {}
+        while (priv->regs->nic_status & 1) {}
         /* Dispose RX buffers - too small for new MTU */
         while (priv->rx_inp != priv->rx_out) {
             struct axi_eth_ring_item * i = priv->rx_ring + priv->rx_out;
             struct sk_buff * skb = i->skb;
             if (skb) {
                 dev_kfree_skb_any(skb);
-                dma_unmap_single(&priv->pdev->dev, i->dma_addr, net_dev->mtu + ETH_HLEN, DMA_FROM_DEVICE);
+                dma_unmap_single(&priv->pdev->dev, i->dma_addr, i->dma_size, DMA_FROM_DEVICE);
                 i->skb = NULL;
             }
-            priv->rx_out = (priv->rx_out + 1) & AXI_ETH_RING_MASK;
+            priv->rx_out = (priv->rx_out + 1) & priv->ring_mask;
         }
         priv->regs->rx_out = priv->rx_out;
         axi_eth_add_rx_buffers(net_dev);
         /* Enable RX */
-        priv->regs->mac_control |= MAC_CONTROL_EN_RX;
+        priv->regs->nic_control |= NIC_CONTROL_EN_RX;
 
         spin_unlock_irq(&priv->lock);
     }
@@ -429,20 +488,20 @@ static irqreturn_t axi_eth_isr(int irq, void * dev_id) {
             struct axi_eth_ring_item * i = priv->rx_ring + priv->rx_out;
             wmb();
             if (i->skb) axi_eth_rx_done(net_dev, i);
-            priv->rx_out = (priv->rx_out + 1) & AXI_ETH_RING_MASK;
+            priv->rx_out = (priv->rx_out + 1) & priv->ring_mask;
             cont = 1;
         }
         if (priv->tx_out != priv->regs->tx_out) {
             struct axi_eth_ring_item * i = priv->tx_ring + priv->tx_out;
             if (i->skb) axi_eth_tx_done(net_dev, i);
-            priv->tx_out = (priv->tx_out + 1) & AXI_ETH_RING_MASK;
+            priv->tx_out = (priv->tx_out + 1) & priv->ring_mask;
             cont = 1;
         }
         if (!cont) break;
     }
 
     if (netif_queue_stopped(net_dev) &&
-        tx_ring_free(priv) >= AXI_ETH_RING_SIZE / 2)
+        tx_ring_free(priv) >= priv->ring_mask / 2)
         netif_wake_queue(net_dev);
 
     spin_unlock_irqrestore(&priv->lock, flags);
@@ -455,32 +514,46 @@ static int axi_eth_ioctl(struct net_device * net_dev, struct ifreq * ifr, int cm
     struct axi_eth_priv * priv = netdev_priv(net_dev);
     int err = 0;
 
-    switch (cmd) {
-    case SIOCGMIIPHY:
-    case SIOCGMIIREG:
-        if (cmd == SIOCGMIIPHY) {
-            if (priv->phy_dev == NULL) return -EAGAIN;
-            data->phy_id = priv->phy_dev->mdio.addr;
-        }
-        err = axi_eth_mdio_read(priv->mdio_bus, data->phy_id, data->reg_num);
-        if (err < 0) return err;
-        data->val_out = (__u16)err;
-        return 0;
+    if (priv->mdio_bus != NULL) {
+        switch (cmd) {
+        case SIOCGMIIPHY:
+        case SIOCGMIIREG:
+            if (cmd == SIOCGMIIPHY) {
+                if (priv->phy_dev == NULL) return -EAGAIN;
+                data->phy_id = priv->phy_dev->mdio.addr;
+            }
+            err = axi_eth_mdio_read(priv->mdio_bus, data->phy_id, data->reg_num);
+            if (err < 0) return err;
+            data->val_out = (__u16)err;
+            return 0;
 
-    case SIOCSMIIREG:
-        return axi_eth_mdio_write(priv->mdio_bus, data->phy_id, data->reg_num, data->val_in);
+        case SIOCSMIIREG:
+            return axi_eth_mdio_write(priv->mdio_bus, data->phy_id, data->reg_num, data->val_in);
+        }
     }
 
     return -EOPNOTSUPP;
 }
 
+static void axi_eth_get_drvinfo(struct net_device * dev, struct ethtool_drvinfo * info) {
+    strscpy(info->driver, DRIVER_NAME, sizeof(info->driver));
+}
 
-static u32 always_on(struct net_device * net_dev) {
-    return 1;
+static u32 axi_eth_get_msglevel(struct net_device * dev) {
+    return axi_eth_debug;
+}
+
+static void axi_eth_set_msglevel(struct net_device * dev, u32 v) {
+    axi_eth_debug = v;
 }
 
 static const struct ethtool_ops axi_eth_ethtool_ops = {
-    .get_link       = always_on,
+    .get_drvinfo    = axi_eth_get_drvinfo,
+    .get_msglevel   = axi_eth_get_msglevel,
+    .set_msglevel   = axi_eth_set_msglevel,
+    .get_link       = ethtool_op_get_link,
+    .get_link_ksettings = phy_ethtool_get_link_ksettings,
+    .set_link_ksettings = phy_ethtool_set_link_ksettings,
     .get_ts_info    = ethtool_op_get_ts_info,
 };
 
@@ -491,7 +564,7 @@ static int axi_eth_dev_init(struct net_device * net_dev) {
     spin_lock_irq(&priv->lock);
 
     priv->regs->int_enable = priv->int_enable = 0;
-    err = request_irq(priv->irq, axi_eth_isr, IRQF_TRIGGER_HIGH, "fpga-axi-eth", net_dev);
+    err = request_irq(priv->irq, axi_eth_isr, IRQF_TRIGGER_HIGH, DRIVER_NAME, net_dev);
     if (err) return err;
 
     priv->rx_inp = priv->regs->rx_inp;
@@ -515,19 +588,19 @@ static int axi_eth_dev_close(struct net_device * net_dev) {
     priv->regs->int_enable = 0;
 
     /* Disable RX, TX */
-    priv->regs->mac_control = 0;
+    priv->regs->nic_control = 0;
     /* Wait active RX, TX to finish */
-    while (priv->regs->mac_status & 3) {}
+    while (priv->regs->nic_status & 3) {}
 
     while (priv->rx_inp != priv->rx_out) {
         struct axi_eth_ring_item * i = priv->rx_ring + priv->rx_out;
         struct sk_buff * skb = i->skb;
         if (skb) {
             dev_kfree_skb_any(skb);
-            dma_unmap_single(&priv->pdev->dev, i->dma_addr, net_dev->mtu + ETH_HLEN, DMA_FROM_DEVICE);
+            dma_unmap_single(&priv->pdev->dev, i->dma_addr, i->dma_size, DMA_FROM_DEVICE);
             i->skb = NULL;
         }
-        priv->rx_out = (priv->rx_out + 1) & AXI_ETH_RING_MASK;
+        priv->rx_out = (priv->rx_out + 1) & priv->ring_mask;
     }
     priv->regs->rx_out = priv->rx_out;
 
@@ -535,7 +608,7 @@ static int axi_eth_dev_close(struct net_device * net_dev) {
         struct axi_eth_ring_item * i = priv->tx_ring + priv->tx_out;
         while (priv->tx_out == priv->regs->tx_out) {}
         if (i->skb) axi_eth_tx_done(net_dev, i);
-        priv->tx_out = (priv->tx_out + 1) & AXI_ETH_RING_MASK;
+        priv->tx_out = (priv->tx_out + 1) & priv->ring_mask;
     }
     priv->regs->tx_out = priv->tx_out;
 
@@ -577,7 +650,9 @@ static int axi_eth_dev_open(struct net_device * net_dev) {
     priv->regs->int_enable = priv->int_enable = INT_STATUS_RX | INT_STATUS_TX;
 
     /* Enable RX, TX, clear MDIO reset */
-    priv->regs->mac_control = MAC_CONTROL_EN_RX | MAC_CONTROL_EN_TX;
+    priv->regs->nic_control = NIC_CONTROL_EN_RX | NIC_CONTROL_EN_TX;
+
+    netif_start_queue(net_dev);
 
     spin_unlock_irq(&priv->lock);
 
@@ -593,7 +668,7 @@ static const struct net_device_ops axi_eth_ops = {
     .ndo_init        = axi_eth_dev_init,
     .ndo_open        = axi_eth_dev_open,
     .ndo_stop        = axi_eth_dev_close,
-    .ndo_do_ioctl    = axi_eth_ioctl,
+    .ndo_eth_ioctl   = axi_eth_ioctl,
     .ndo_start_xmit  = axi_eth_xmit,
     .ndo_get_stats64 = axi_eth_get_stats64,
     .ndo_set_mac_address = eth_mac_addr,
@@ -605,10 +680,12 @@ static const struct net_device_ops axi_eth_ops = {
 
 /* Setup and register the device. */
 static int axi_eth_probe(struct platform_device * pdev) {
+    static unsigned dev_no = 0;
     struct net_device * net_dev = NULL;
     struct axi_eth_priv * priv = NULL;
     struct resource * iomem;
     void __iomem * ioaddr;
+    uint32_t capability;
     int err = -ENOMEM;
     const u8 * maddr;
     int len;
@@ -640,10 +717,12 @@ static int axi_eth_probe(struct platform_device * pdev) {
     priv->pdev = pdev;
     priv->net_dev = net_dev;
     priv->irq = irq;
+    priv->dev_no = dev_no++;
 
     maddr = of_get_property(pdev->dev.of_node, "local-mac-address", &len);
     if (maddr && len == ETH_ALEN) {
-        memcpy(net_dev->dev_addr, maddr, ETH_ALEN);
+        net_dev->addr_len = ETH_ALEN;
+        dev_addr_set(net_dev, maddr);
     }
     else {
         printk(KERN_ERR "AXI-ETH: Can't get MAC address\n");
@@ -651,7 +730,30 @@ static int axi_eth_probe(struct platform_device * pdev) {
         goto out;
     }
 
-    if (priv->regs->capability & MAC_CAPABILITY_MDIO) {
+    priv->ring_mask = 0xf;
+    priv->dma_addr_bits = 32;
+    capability = priv->regs->capability;
+
+    if (capability & NIC_CAPABILITY_ADDR) {
+        priv->dma_addr_bits = (capability & NIC_CAPABILITY_ADDR) >> __builtin_ctz(NIC_CAPABILITY_ADDR);
+        err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(priv->dma_addr_bits));
+        if (err) {
+            printk(KERN_ERR "AXI-ETH: Can't set DMA mask\n");
+            goto out;
+        }
+    }
+
+    if (capability & NIC_CAPABILITY_RING) {
+        unsigned ring_bits = (capability & NIC_CAPABILITY_RING) >> __builtin_ctz(NIC_CAPABILITY_RING);
+        if ((1u << ring_bits) > AXI_ETH_MAX_RING_SIZE) {
+            priv->ring_mask = AXI_ETH_MAX_RING_SIZE - 1;
+        }
+        else {
+            priv->ring_mask = (1u << ring_bits) - 1;
+        }
+    }
+
+    if (capability & NIC_CAPABILITY_MDIO) {
         err = axi_eth_mdio_register(priv);
         if (err) {
             printk(KERN_ERR "AXI-ETH: Can't register MDIO bus\n");
@@ -676,7 +778,11 @@ out:
     return err;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
 static int axi_eth_remove(struct platform_device * pdev) {
+#else
+static void axi_eth_remove(struct platform_device * pdev) {
+#endif
     struct net_device * net_dev = platform_get_drvdata(pdev);
     struct axi_eth_priv * priv = netdev_priv(net_dev);
     unregister_netdev(net_dev);
@@ -685,12 +791,14 @@ static int axi_eth_remove(struct platform_device * pdev) {
         mdiobus_free(priv->mdio_bus);
     }
     free_netdev(net_dev);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
     return 0;
+#endif
 }
 
 static struct platform_driver axi_eth_driver = {
     .driver = {
-        .name = "riscv-axi-eth",
+        .name = DRIVER_NAME,
         .of_match_table = axi_eth_of_match_table,
     },
     .probe = axi_eth_probe,

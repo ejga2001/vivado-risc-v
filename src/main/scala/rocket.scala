@@ -333,6 +333,66 @@ class Rocket64x1 extends Config(
   new boom.common.WithNMediumBooms(1) ++
   new RocketWideBusConfig)
 
+class Rocket64x1BimodalBP(params: Seq[Int]) extends Config(
+  new WithInclusiveCache  ++
+  new WithNBreakpoints(8) ++
+  new boom.common.WithNMediumBoomsBimodalBP(
+    n = 1,
+    BHTEntries = params(0)
+  ) ++
+  new RocketWideBusConfig)
+
+class Rocket64x1GshareBP(params: Seq[Int]) extends Config(
+  new WithInclusiveCache  ++
+  new WithNBreakpoints(8) ++
+  new boom.common.WithNMediumBoomsGshareBP(
+    n = 1,
+    globalPredictorSize = params(0) / params(1)
+  ) ++
+  new RocketWideBusConfig)
+
+class Rocket64x1LocalBP(params: Seq[Int]) extends Config(
+  new WithInclusiveCache  ++
+  new WithNBreakpoints(8) ++
+  new boom.common.WithNMediumBoomsLocalBP(
+    n = 1,
+    localPredictorSize = params(0) / params(2),
+    localHistoryTableSize = params(1) / params(2)
+  ) ++
+  new RocketWideBusConfig)
+
+class Rocket64x1TournamentBP(params: Seq[Int]) extends Config(
+  new WithInclusiveCache  ++
+  new WithNBreakpoints(8) ++
+  new boom.common.WithNMediumBoomsTournamentBP(
+    n = 1,
+    choicePredictorSize = params(0) / params(4),
+    globalPredictorSize = params(1) / params(4),
+    localPredictorSize = params(2) / params(4),
+    localHistoryTableSize = params(3) / params(4),
+  ) ++
+  new RocketWideBusConfig)
+
+class Rocket64x1TAGEBP(params: Seq[Int]) extends Config(
+  new WithInclusiveCache  ++
+  new WithNBreakpoints(8) ++
+  new boom.common.WithNMediumBoomsTAGEBP(
+    n = 1,
+    BHTEntries = params(0) / params(3),
+                    // nSets, histLen, tagSz
+    tableInfo = Seq((   32,       2,     7),
+                    (   32,       4,     7),
+                    (   32,       8,     8),
+                    (   64,      16,     8),
+                    (   64,      32,     9),
+                    (   64,      64,     9)).map { case (nSets, histLen, tagSz) =>
+                                                  val step = scala.math.pow(2, params(1)).asInstanceOf[Int]
+                                                  ((nSets * step) / params(3), histLen, tagSz)
+                                                },
+    uBitsPeriod = params(2)
+  ) ++
+  new RocketWideBusConfig)
+
 /* Note: multi-core BOOM appears unstable */
 class Rocket64x2 extends Config(
   new WithInclusiveCache  ++

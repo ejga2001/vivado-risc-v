@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
@@ -32,7 +33,7 @@
 #define CR_RESET_TX_FIFO    (1 << 1) /* reset transmit FIFO    */
 #define CR_IE_RX_READY      (1 << 4) /* enable receive ready interrupt  */
 #define CR_IE_TX_READY      (1 << 5) /* enable transmit ready interrupt */
-#define CR_TX_STOP          (1 << 6) /* stop transmit */
+#define CR_TX_STOP          (1 << 6) /* stop transmit          */
 
 struct uart_regs {
     volatile uint32_t rx_fifo;
@@ -47,11 +48,13 @@ struct uart_regs {
 #define MAX_PORTS  CONFIG_SERIAL_AXI_UART_PORTS
 static struct uart_port axi_uart_ports[MAX_PORTS];
 
+#define MAX_CHARS_PER_INTERRUPT 32
+
 #ifdef CONFIG_SERIAL_AXI_UART_CONSOLE
-static void axi_uart_console_putchar(struct uart_port * port, int ch) {
+static void axi_uart_console_putchar(struct uart_port * port, unsigned char ch) {
     struct uart_regs __iomem * regs = (struct uart_regs __iomem *)port->membase;
     while (regs->status & SR_TX_FIFO_FULL) {}
-    regs->tx_fifo = ch & 0xff;
+    regs->tx_fifo = ch;
 }
 
 static void axi_uart_console_write(struct console * con, const char * s, unsigned n) {
@@ -151,13 +154,23 @@ static struct uart_driver axi_uart_port_driver = {
 
 static int axi_uart_transmit(struct uart_port * port) {
     struct uart_regs __iomem * regs = (struct uart_regs __iomem *)port->membase;
-    struct circ_buf * xmit = &port->state->xmit;
     uint32_t control = regs->control;
     unsigned tx_cnt = 0;
     int ret = 0;
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
+    struct circ_buf * xmit = &port->state->xmit;
+    unsigned fifo_len = uart_circ_chars_pending(xmit);
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
+    struct kfifo * xmit = &port->state->port.xmit_fifo;
+    unsigned fifo_len = kfifo_len(xmit);
+    uint8_t ch = 0;
+#else
+    struct tty_port * tport = &port->state->port;
+    unsigned fifo_len = kfifo_len(&tport->xmit_fifo);
+    uint8_t ch = 0;
+#endif
     regs->control = control &= ~CR_IE_TX_READY;
-    for (;;) {
+    while (tx_cnt < MAX_CHARS_PER_INTERRUPT) {
         if (port->x_char) {
             regs->tx_fifo = port->x_char | 0x100;
             port->icount.tx++;
@@ -168,45 +181,59 @@ static int axi_uart_transmit(struct uart_port * port) {
             regs->control = control |= CR_TX_STOP;
             break;
         }
-        else if (!uart_circ_empty(xmit)) {
+        else if (fifo_len > 0) {
             regs->control = control &= ~CR_TX_STOP;
             if (regs->status & SR_TX_FIFO_FULL) {
                 regs->control = control |= CR_IE_TX_READY;
                 break;
             }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
             regs->tx_fifo = xmit->buf[xmit->tail] & 0xff;
             xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
+            kfifo_get(xmit, &ch);
+            regs->tx_fifo = ch;
+#else
+            if (!kfifo_get(&tport->xmit_fifo, &ch)) break;
+            regs->tx_fifo = ch;
+#endif
             port->icount.tx++;
-            ret = 1;
+            fifo_len--;
             tx_cnt++;
+            ret = 1;
         }
         else {
             regs->control = control &= ~CR_TX_STOP;
             break;
         }
     }
-    if (tx_cnt && uart_circ_chars_pending(xmit) < WAKEUP_CHARS) uart_write_wakeup(port);
+    if (tx_cnt && fifo_len < WAKEUP_CHARS) uart_write_wakeup(port);
     return ret;
+}
+
+static int axi_uart_receive(struct uart_port * port) {
+    struct tty_port * tport = &port->state->port;
+    struct uart_regs __iomem * regs = (struct uart_regs __iomem *)port->membase;
+    unsigned rx_cnt = 0;
+
+    while (rx_cnt < MAX_CHARS_PER_INTERRUPT && (regs->status & SR_RX_FIFO_VALID)) {
+        tty_insert_flip_char(tport, regs->rx_fifo, TTY_NORMAL);
+        port->icount.rx++;
+        rx_cnt++;
+    }
+    if (rx_cnt) tty_flip_buffer_push(tport);
+
+    return rx_cnt > 0;
 }
 
 static irqreturn_t axi_uart_isr(int irq, void * dev_id) {
     struct uart_port * port = dev_id;
-    struct tty_port * tport = &port->state->port;
-    struct uart_regs __iomem * regs = (struct uart_regs __iomem *)port->membase;
-    unsigned long flags;
-    unsigned rx_cnt = 0;
     irqreturn_t ret = IRQ_NONE;
 
-    spin_lock_irqsave(&port->lock, flags);
+    spin_lock(&port->lock);
     if (axi_uart_transmit(port)) ret = IRQ_HANDLED;
-    while (regs->status & SR_RX_FIFO_VALID) {
-        tty_insert_flip_char(tport, regs->rx_fifo, TTY_NORMAL);
-        port->icount.rx++;
-        ret = IRQ_HANDLED;
-        rx_cnt++;
-    }
-    spin_unlock_irqrestore(&port->lock, flags);
-    if (rx_cnt) tty_flip_buffer_push(tport);
+    if (axi_uart_receive(port)) ret = IRQ_HANDLED;
+    spin_unlock(&port->lock);
 
     return ret;
 }
@@ -227,14 +254,19 @@ static void axi_uart_set_mctrl(struct uart_port * port, unsigned int mctrl) {
 }
 
 static void axi_uart_stop_tx(struct uart_port * port) {
+    lockdep_assert_held_once(&port->lock);
     axi_uart_transmit(port);
 }
 
 static void axi_uart_start_tx(struct uart_port * port) {
+    lockdep_assert_held_once(&port->lock);
     axi_uart_transmit(port);
 }
 
 static void axi_uart_stop_rx(struct uart_port * port) {
+    /* Called before port shutdown */
+    struct uart_regs __iomem * regs = (struct uart_regs __iomem *)port->membase;
+    regs->control &= ~CR_IE_RX_READY;
 }
 
 static void axi_uart_break_ctl(struct uart_port *port, int ctl) {
@@ -259,7 +291,11 @@ static void axi_uart_shutdown(struct uart_port * port) {
     free_irq(port->irq, port);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 static void axi_uart_set_termios(struct uart_port * port, struct ktermios * termios, struct ktermios * old) {
+#else
+static void axi_uart_set_termios(struct uart_port * port, struct ktermios * termios, const struct ktermios * old) {
+#endif
 }
 
 static const char * axi_uart_type(struct uart_port * port) {
@@ -348,7 +384,9 @@ static int axi_uart_assign(struct device * dev, int id, u32 mapbase, void __iome
 
     spin_lock_init(&port->lock);
     port->fifosize = 0; /* disable timeout in uart_wait_until_sent() */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0)
     port->timeout = HZ / 50; /* must not be 0 to avoid interger overflow in uart_wait_until_sent() */
+#endif
     port->regshift = 2; /* 2 means 32-bit registers */
     port->iotype = UPIO_MEM;
     port->iobase = 1; /* mark port in use */
@@ -379,7 +417,10 @@ static int axi_uart_release(struct device * dev) {
     int rc = 0;
 
     if (port) {
-        rc = uart_remove_one_port(&axi_uart_port_driver, port);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,5,0)
+        rc =
+#endif
+            uart_remove_one_port(&axi_uart_port_driver, port);
         dev_set_drvdata(dev, NULL);
         port->mapbase = 0;
     }
@@ -418,8 +459,13 @@ static int axi_uart_probe(struct platform_device * pdev) {
     return ret;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
 static int axi_uart_remove(struct platform_device * pdev) {
     return axi_uart_release(&pdev->dev);
+#else
+static void axi_uart_remove(struct platform_device * pdev) {
+    axi_uart_release(&pdev->dev);
+#endif
 }
 
 static int __maybe_unused axi_uart_suspend(struct device * dev) {

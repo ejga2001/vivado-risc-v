@@ -33,7 +33,7 @@ if [ ! -d linux-stable/kernel ] ; then
   make update-submodules
 fi
 
-KERNEL_VER=$(cd linux-stable && git describe --exact-match --abbrev=0)
+KERNEL_VER="5.10.7"
 
 # --- Retrive Debian disk image ---
 
@@ -104,6 +104,7 @@ pushd debian-riscv64/rootfs
   fi
   # Copiar benchmarks al sistema de archivos
   sudo cp -Rf "/home/enrique/CLionProjects/cva-sdk/benchmarks" ./home/debian/
+  sudo cp -Rf "/home/enrique/CLionProjects/cva-sdk/loop-test/loop.elf" ./home/debian/loop.elf
 
   # Sincronizar cambios
   sync
@@ -134,9 +135,8 @@ pushd debian-riscv64/rootfs
     source /etc/profile
     wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
     python2 get-pip.py
-    cd ~
-    chown -R debian benchmarks
-    echo 'cd ~/benchmarks/parboil' >> ~/.bashrc
+    chown -R debian /home/debian/benchmarks
+    echo 'cd /home/debian/benchmarks/parboil' >> ~/.bashrc
   "
 
   # Salir del entorno chroot y desmontar sistemas de archivos
