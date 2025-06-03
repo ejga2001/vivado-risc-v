@@ -38,11 +38,11 @@ else
 	sudo apt install python
 endif
 
-apt-install-qemi:
+apt-install-qemu:
 	sudo apt install qemu-system-misc opensbi u-boot-qemu qemu-utils
 
 # skip submodules which are not needed and take long time to update
-override SKIP_SUBMODULES += torture software/gemmini-rocc-tests software/onnxruntime-riscv
+override SKIP_SUBMODULES += linux-stable torture software/gemmini-rocc-tests software/onnxruntime-riscv
 
 update:
 	git pull --no-recurse-submodules
@@ -333,7 +333,7 @@ vivado-project: $(proj_time)
 # Multi-threading appears broken in Vivado. It causes intermittent failures.
 MAX_THREADS ?= 1
 
-$(synthesis): $(proj_time)
+$(synthesis): #$(proj_time)
 	echo "set_param general.maxThreads $(MAX_THREADS)" >>$(proj_path)/make-synthesis.tcl
 	echo "open_project $(proj_file)" >$(proj_path)/make-synthesis.tcl
 	echo "update_compile_order -fileset sources_1" >>$(proj_path)/make-synthesis.tcl

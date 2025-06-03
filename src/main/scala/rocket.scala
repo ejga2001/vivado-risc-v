@@ -356,8 +356,9 @@ class Rocket64x1LocalBP(params: Seq[Int]) extends Config(
   new WithNBreakpoints(8) ++
   new boom.common.WithNMediumBoomsLocalBP(
     n = 1,
-    localPredictorSize = params(0) / params(2),
-    localHistoryTableSize = params(1) / params(2)
+    localPredictorSize = params(0) / params(3),
+    localHistoryTableSize = params(1) / params(3),
+    localCtrBits = params(2)
   ) ++
   new RocketWideBusConfig)
 
@@ -386,8 +387,8 @@ class Rocket64x1TAGEBP(params: Seq[Int]) extends Config(
                     (   64,      16,     8),
                     (   64,      32,     9),
                     (   64,      64,     9)).map { case (nSets, histLen, tagSz) =>
-                                                  val step = scala.math.pow(2, params(1)).asInstanceOf[Int]
-                                                  ((nSets * step) / params(3), histLen, tagSz)
+                                                  val step = scala.math.pow(2, params(1)-1).asInstanceOf[Int]
+                                                  ((nSets * step), histLen, tagSz)
                                                 },
     uBitsPeriod = params(2)
   ) ++
