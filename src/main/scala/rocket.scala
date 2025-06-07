@@ -338,7 +338,7 @@ class Rocket64x1BimodalBP(params: Seq[Int]) extends Config(
   new WithNBreakpoints(8) ++
   new boom.common.WithNMediumBoomsBimodalBP(
     n = 1,
-    BHTEntries = params(0)
+    BHTEntries = params(0) / params(1)
   ) ++
   new RocketWideBusConfig)
 
